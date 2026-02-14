@@ -21,7 +21,6 @@ The repository is ${data.repository}.
 
 Here's the activity data for the past week:
 
-Commits: ${data.commits.length}
 Pull Requests: ${data.pullRequests.length} (${data.pullRequests.filter(pr => pr.merged).length} merged)
 Issues: ${data.issues.length} (${data.issues.filter(i => i.state === 'closed').length} closed)
 Discussions: ${data.discussions.length}
@@ -32,8 +31,8 @@ ${data.pullRequests.slice(0, 5).map(pr => `- #${pr.number}: ${pr.title} (${pr.st
 Key Issues:
 ${data.issues.slice(0, 5).map(i => `- #${i.number}: ${i.title} (${i.state})`).join('\n')}
 
-Write a concise 2-3 paragraph executive summary highlighting the most important developments, trends, and activities. 
-Focus on what developers and users should know. Use a friendly but professional tone.`;
+Write a SINGLE PARAGRAPH executive summary highlighting ONLY the most important developments and activities. 
+Focus on what developers and users should know. Use a friendly but professional tone. Keep it concise.`;
 
     const response = await client.chat.completions.create({
       messages: [
@@ -42,7 +41,7 @@ Focus on what developers and users should know. Use a friendly but professional 
       ],
       model: 'gpt-4o-mini',
       temperature: 0.7,
-      max_tokens: 500
+      max_tokens: 300
     });
 
     return response.choices[0].message.content;
@@ -52,7 +51,52 @@ Focus on what developers and users should know. Use a friendly but professional 
   }
 }
 
-function formatNewsletterMarkdown(data, aiSummary) {
+async function generateItemExplanations(items, type, token) {
+  if (!token || items.length === 0) {
+    return items.map(() => null);
+  }
+
+  try {
+    const client = new OpenAI({
+      baseURL: 'https://models.inference.ai.azure.com',
+      apiKey: token,
+    });
+
+    const itemDescriptions = items.map(item => {
+      if (type === 'pr') {
+        return `#${item.number}: ${item.title} (${item.state}${item.merged ? ', merged' : ''})`;
+      } else if (type === 'issue') {
+        return `#${item.number}: ${item.title} (${item.state})`;
+      } else if (type === 'discussion') {
+        return `#${item.number}: ${item.title} (${item.comments} comments)`;
+      }
+    }).join('\n');
+
+    const prompt = `For each ${type === 'pr' ? 'pull request' : type} below, provide a 1-2 sentence explanation of what it means for developers/users. Focus on the impact and relevance. If an item is trivial (like fixing typos, minor formatting, or documentation tweaks), respond with "SKIP" for that item.
+
+${itemDescriptions}
+
+Respond with one explanation per line, in the same order. Use "SKIP" for trivial items.`;
+
+    const response = await client.chat.completions.create({
+      messages: [
+        { role: 'system', content: 'You provide clear, concise explanations of software changes.' },
+        { role: 'user', content: prompt }
+      ],
+      model: 'gpt-4o-mini',
+      temperature: 0.5,
+      max_tokens: 1000
+    });
+
+    const explanations = response.choices[0].message.content.split('\n').filter(line => line.trim());
+    return explanations.map(exp => exp.trim() === 'SKIP' ? null : exp);
+  } catch (error) {
+    console.warn(`Failed to generate ${type} explanations:`, error.message);
+    return items.map(() => null);
+  }
+}
+
+async function formatNewsletterMarkdown(data, aiSummary) {
   const fromDate = new Date(data.dateRange.from);
   const toDate = new Date(data.dateRange.to);
   
@@ -68,63 +112,41 @@ function formatNewsletterMarkdown(data, aiSummary) {
   
   // Statistics
   markdown += `## 📊 Weekly Statistics\n\n`;
-  markdown += `- **Commits**: ${data.commits.length}\n`;
   markdown += `- **Pull Requests**: ${data.pullRequests.length} (${data.pullRequests.filter(pr => pr.merged).length} merged)\n`;
   markdown += `- **Issues**: ${data.issues.length} (${data.issues.filter(i => i.state === 'closed').length} closed)\n`;
   markdown += `- **Discussions**: ${data.discussions.length}\n\n`;
   
-  // Commits
-  if (data.commits.length > 0) {
-    markdown += `## 💻 Commits (${data.commits.length})\n\n`;
-    
-    const topCommits = data.commits.slice(0, 20);
-    for (const commit of topCommits) {
-      markdown += `- [\`${commit.sha}\`](${commit.url}) ${commit.message} - *${commit.author}*\n`;
-    }
-    
-    if (data.commits.length > 20) {
-      markdown += `\n*...and ${data.commits.length - 20} more commits*\n`;
-    }
-    markdown += '\n';
-  }
+  const token = process.env.GITHUB_TOKEN;
   
-  // Pull Requests
+  // Pull Requests with explanations
   if (data.pullRequests.length > 0) {
-    markdown += `## 🔀 Pull Requests (${data.pullRequests.length})\n\n`;
-    
     const merged = data.pullRequests.filter(pr => pr.merged);
     const opened = data.pullRequests.filter(pr => !pr.merged && pr.state === 'open');
     const closed = data.pullRequests.filter(pr => !pr.merged && pr.state === 'closed');
     
-    if (merged.length > 0) {
-      markdown += `### Merged (${merged.length})\n\n`;
-      for (const pr of merged) {
-        markdown += `- [#${pr.number}](${pr.url}) ${pr.title} - *@${pr.author}*\n`;
-      }
-      markdown += '\n';
-    }
+    const allPRs = [...merged, ...opened, ...closed];
+    console.log('Generating PR explanations...');
+    const explanations = await generateItemExplanations(allPRs, 'pr', token);
     
-    if (opened.length > 0) {
-      markdown += `### Opened (${opened.length})\n\n`;
-      for (const pr of opened) {
-        markdown += `- [#${pr.number}](${pr.url}) ${pr.title} - *@${pr.author}*\n`;
-      }
-      markdown += '\n';
-    }
+    const relevantPRs = allPRs.filter((_, idx) => explanations[idx] !== null);
+    const relevantExplanations = explanations.filter(exp => exp !== null);
     
-    if (closed.length > 0) {
-      markdown += `### Closed (${closed.length})\n\n`;
-      for (const pr of closed) {
-        markdown += `- [#${pr.number}](${pr.url}) ${pr.title} - *@${pr.author}*\n`;
+    if (relevantPRs.length > 0) {
+      markdown += `## 🔀 Pull Requests\n\n`;
+      
+      for (let i = 0; i < relevantPRs.length; i++) {
+        const pr = relevantPRs[i];
+        const explanation = relevantExplanations[i];
+        const status = pr.merged ? '✅ Merged' : pr.state === 'open' ? '🔄 Open' : '❌ Closed';
+        markdown += `### [#${pr.number}](${pr.url}) ${pr.title}\n`;
+        markdown += `**${status}** | *@${pr.author}*\n\n`;
+        markdown += `${explanation}\n\n`;
       }
-      markdown += '\n';
     }
   }
   
-  // Issues
+  // Issues with explanations
   if (data.issues.length > 0) {
-    markdown += `## 🐛 Issues (${data.issues.length})\n\n`;
-    
     const opened = data.issues.filter(i => {
       const created = new Date(i.created_at);
       const since = new Date(data.dateRange.from);
@@ -132,33 +154,48 @@ function formatNewsletterMarkdown(data, aiSummary) {
     });
     
     const closed = data.issues.filter(i => i.state === 'closed' && i.closed_at);
+    const allIssues = [...opened, ...closed];
     
-    if (opened.length > 0) {
-      markdown += `### Opened (${opened.length})\n\n`;
-      for (const issue of opened) {
-        const labels = issue.labels.length > 0 ? ` \`${issue.labels.join('`, `')}\`` : '';
-        markdown += `- [#${issue.number}](${issue.url}) ${issue.title}${labels} - *@${issue.author}*\n`;
-      }
-      markdown += '\n';
-    }
+    console.log('Generating issue explanations...');
+    const explanations = await generateItemExplanations(allIssues, 'issue', token);
     
-    if (closed.length > 0) {
-      markdown += `### Closed (${closed.length})\n\n`;
-      for (const issue of closed) {
-        const labels = issue.labels.length > 0 ? ` \`${issue.labels.join('`, `')}\`` : '';
-        markdown += `- [#${issue.number}](${issue.url}) ${issue.title}${labels} - *@${issue.author}*\n`;
+    const relevantIssues = allIssues.filter((_, idx) => explanations[idx] !== null);
+    const relevantExplanations = explanations.filter(exp => exp !== null);
+    
+    if (relevantIssues.length > 0) {
+      markdown += `## 🐛 Issues\n\n`;
+      
+      for (let i = 0; i < relevantIssues.length; i++) {
+        const issue = relevantIssues[i];
+        const explanation = relevantExplanations[i];
+        const status = issue.state === 'closed' ? '✅ Closed' : '🔄 Open';
+        const labels = issue.labels.length > 0 ? ` | \`${issue.labels.join('`, `')}\`` : '';
+        markdown += `### [#${issue.number}](${issue.url}) ${issue.title}\n`;
+        markdown += `**${status}** | *@${issue.author}*${labels}\n\n`;
+        markdown += `${explanation}\n\n`;
       }
-      markdown += '\n';
     }
   }
   
-  // Discussions
+  // Discussions with explanations
   if (data.discussions.length > 0) {
-    markdown += `## 💬 Discussions (${data.discussions.length})\n\n`;
-    for (const discussion of data.discussions) {
-      markdown += `- [#${discussion.number}](${discussion.url}) ${discussion.title} (${discussion.comments} comments) - *@${discussion.author}*\n`;
+    console.log('Generating discussion explanations...');
+    const explanations = await generateItemExplanations(data.discussions, 'discussion', token);
+    
+    const relevantDiscussions = data.discussions.filter((_, idx) => explanations[idx] !== null);
+    const relevantExplanations = explanations.filter(exp => exp !== null);
+    
+    if (relevantDiscussions.length > 0) {
+      markdown += `## 💬 Discussions\n\n`;
+      
+      for (let i = 0; i < relevantDiscussions.length; i++) {
+        const discussion = relevantDiscussions[i];
+        const explanation = relevantExplanations[i];
+        markdown += `### [#${discussion.number}](${discussion.url}) ${discussion.title}\n`;
+        markdown += `**${discussion.comments} comments** | *@${discussion.author}*\n\n`;
+        markdown += `${explanation}\n\n`;
+      }
     }
-    markdown += '\n';
   }
   
   markdown += `---\n\n`;
@@ -187,6 +224,7 @@ function saveNewsletter(markdown, outputDir = 'newsletters') {
 
 module.exports = {
   generateSummaryWithAI,
+  generateItemExplanations,
   formatNewsletterMarkdown,
   saveNewsletter
 };

@@ -24,7 +24,7 @@ async function main() {
 
     // Format newsletter
     console.log('Formatting newsletter...');
-    const markdown = formatNewsletterMarkdown(data, aiSummary);
+    const markdown = await formatNewsletterMarkdown(data, aiSummary);
 
     // Save newsletter
     const filepath = saveNewsletter(markdown);
