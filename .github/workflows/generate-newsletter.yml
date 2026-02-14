@@ -1,0 +1,76 @@
+name: Generate Weekly Newsletter
+
+on:
+  schedule:
+    # Every Monday at 9:00 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch: # Allow manual trigger for testing
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  generate-newsletter:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate newsletter
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: algorand
+          REPO_NAME: go-algorand
+          DAYS_BACK: 7
+        run: npm run generate
+
+      - name: Update index
+        run: node scripts/update-index.js
+
+      - name: Commit and push newsletter
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add newsletters/
+          git add index.html
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Add weekly newsletter for $(date +%Y-%m-%d)
+            
+            Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+            git push
+          fi
+
+  deploy-pages:
+    needs: generate-newsletter
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
